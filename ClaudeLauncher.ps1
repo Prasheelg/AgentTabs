@@ -25,8 +25,59 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
+# Compiling the C# below takes ~0.45 s, so a compiled copy is cached in %LOCALAPPDATA%\ClaudeLauncher\types,
+# named after a hash of the source. Windows Defender scans a new DLL for several seconds the first time it's
+# loaded, so a missing copy is built and loaded once by a hidden background process (Start-TypeCacheWarmer)
+# and only used from the next start on, once it's marked .ready. Until then the source is compiled in memory.
+$TypeCache = Join-Path $env:LOCALAPPDATA 'ClaudeLauncher\types'
+$script:TypeFiles = @()
+function Import-Type($Name, $TypeDefinition) {
+    $sha  = [System.Security.Cryptography.SHA256]::Create()
+    $hash = -join ($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($TypeDefinition))[0..7] | ForEach-Object { $_.ToString('x2') })
+    $dll  = Join-Path $TypeCache "$Name-$hash.dll"
+    $script:TypeFiles += "$Name-$hash"
+    if (Test-Path -LiteralPath "$dll.ready") {
+        try { Add-Type -Path $dll; return } catch { }   # fall back to compiling
+    }
+    Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition $TypeDefinition
+    try {
+        New-Item -ItemType Directory -Force -Path $TypeCache | Out-Null
+        [System.IO.File]::WriteAllText("$dll.cs", $TypeDefinition)   # picked up by the warmer
+        $script:WarmTypes = $true
+    } catch { }
+}
+
+# Builds and loads the queued .cs files in a windowless background process, then tidies stale copies.
+function Start-TypeCacheWarmer {
+    if (-not $script:WarmTypes) { return }
+    $keep = ($script:TypeFiles | ForEach-Object { "'$_'" }) -join ','
+    $cmd = @"
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+`$dir = '$($TypeCache -replace "'", "''")'
+foreach (`$cs in Get-ChildItem -LiteralPath `$dir -Filter *.dll.cs) {
+    `$dll = `$cs.FullName.Substring(0, `$cs.FullName.Length - 3)
+    try {
+        Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition ([IO.File]::ReadAllText(`$cs.FullName)) -OutputAssembly `$dll -OutputType Library
+        Add-Type -Path `$dll
+        New-Item -ItemType File -Force -Path "`$dll.ready" | Out-Null
+    } catch { Remove-Item -LiteralPath `$dll -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath `$cs.FullName -ErrorAction SilentlyContinue
+}
+`$keep = @($keep)
+Get-ChildItem -LiteralPath `$dir -File | Where-Object { `$keep -notcontains (`$_.Name -replace '\.dll.*$', '') } |
+    Remove-Item -ErrorAction SilentlyContinue
+"@
+    try {
+        $si = New-Object System.Diagnostics.ProcessStartInfo('powershell.exe')
+        $si.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' +
+                        [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($cmd))
+        $si.UseShellExecute = $false; $si.CreateNoWindow = $true   # no console window at all
+        [void][System.Diagnostics.Process]::Start($si)
+    } catch { }
+}
+
 # Win32 helpers for docking a console window into a tab page
-Add-Type -TypeDefinition @'
+Import-Type 'dock' -TypeDefinition @'
 using System;
 using System.Text;
 using System.Runtime.InteropServices;
@@ -120,7 +171,7 @@ if (-not $first) {
 }
 
 # Dark theme: palette, native theming calls, owner-drawn tab strip and icon buttons
-Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @'
+Import-Type 'ui' -TypeDefinition @'
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -1036,7 +1087,7 @@ function Note-Recent($proj) {
     if ($script:Restoring) { return }   # reopening last session's tabs isn't a fresh use
     $script:Config.recent = @(@($proj.Path) + @($script:Config.recent | Where-Object { $_ -ne $proj.Path }) | Select-Object -First 20)
     $script:RecentDirty = $true
-    Save-Config
+    $script:SavePending = $true   # Update-Sessions saves once, rather than once per pane of a grid
 }
 
 # Re-sorts the list after projects were opened, once the Projects tab is showing.
@@ -1247,13 +1298,14 @@ function Get-QuotableDir($path) {
     return $dir
 }
 
-# Opens the projects in one Windows Terminal tab (split side by side when there are several).
-function Open-External($projs) {
+# Opens the projects in one Windows Terminal tab (split side by side when there are several),
+# or with -Tabs, each in its own tab. One wt.exe call either way, so the tabs land in the same window.
+function Open-External($projs, [switch]$Tabs) {
     if ($script:HasWT) {
         $parts = for ($i = 0; $i -lt $projs.Count; $i++) {
             $p = $projs[$i]
             $cmd   = Get-ClaudeCmd $p
-            $verb  = if ($i -eq 0) { 'new-tab' } else { 'split-pane -V' }
+            $verb  = if ($i -eq 0 -or $Tabs) { 'new-tab' } else { 'split-pane -V' }
             $title = ($p.Name -replace '[;"]', '')
             $dir   = (Get-QuotableDir $p.Path) -replace ';', '\;'   # wt splits commands on any unescaped ';', even inside quotes
             "$verb --title `"$title`" --suppressApplicationTitle -d `"$dir`" cmd /k $cmd"
@@ -1275,15 +1327,11 @@ function Get-SelectedProjects {
 }
 
 function Open-Selected {
-    $i = 0
-    foreach ($p in @(Get-SelectedProjects)) {
-        if ($chkExternal.Checked) {
-            if ($i -gt 0) { Start-Sleep -Milliseconds 800 }   # let the named window exist before the next tab
-            Open-External @($p)
-        } else {
-            [void](Open-InNewTab $p)
-        }
-        $i++
+    $projs = @(Get-SelectedProjects)
+    if ($chkExternal.Checked) {
+        if ($projs.Count -gt 0) { Open-External $projs -Tabs }
+    } else {
+        foreach ($p in $projs) { [void](Open-InNewTab $p) }
     }
     Update-RecentOrder
 }
@@ -1305,24 +1353,48 @@ function Open-SideBySide {
 # conhost.exe is started explicitly so Windows 11 doesn't hand the console off to Windows Terminal.
 # A tab's body holds either one pane or a tree of SplitContainers with a pane at every leaf.
 
+# Starts the console without waiting for its window: the pane shows "Starting..." and $dockTimer docks
+# the window once it appears, so opening several panes doesn't stall the launcher.
+$ConsoleTimeout = 10   # seconds for the console window to appear
 function Start-Console($proj) {
-    $p = Start-Process -FilePath 'conhost.exe' -ArgumentList "cmd.exe /k $(Get-ClaudeCmd $proj)" `
-                       -WorkingDirectory $proj.Path -WindowStyle Hidden -PassThru
-
-    $hwnd = [IntPtr]::Zero
-    $deadline = (Get-Date).AddSeconds(5)
-    while ($hwnd -eq [IntPtr]::Zero -and (Get-Date) -lt $deadline -and -not $p.HasExited) {
-        [System.Windows.Forms.Application]::DoEvents()
-        Start-Sleep -Milliseconds 50
-        $hwnd = [ConsoleDock]::FindConsoleWindow($p.Id)
-    }
-    if ($hwnd -eq [IntPtr]::Zero) {
-        if (-not $p.HasExited) { & taskkill.exe /T /F /PID $p.Id 2>&1 | Out-Null }
-        [System.Windows.Forms.MessageBox]::Show("Could not start a console for $($proj.Name).", 'Claude Launcher', 'OK', 'Error') | Out-Null
+    try {
+        # Process.Start directly: about a third of Start-Process's time, which adds up when opening a grid
+        $si = New-Object System.Diagnostics.ProcessStartInfo('conhost.exe', "cmd.exe /k $(Get-ClaudeCmd $proj)")
+        $si.UseShellExecute = $true; $si.WindowStyle = 'Hidden'; $si.WorkingDirectory = $proj.Path
+        $p = [System.Diagnostics.Process]::Start($si)
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show("Could not start a console for $($proj.Name).`n`n$_", 'Claude Launcher', 'OK', 'Error') | Out-Null
         return $null
     }
     Note-Recent $proj
-    return [pscustomobject]@{ Proc = $p; Hwnd = $hwnd }
+    $dockTimer.Start()
+    return [pscustomobject]@{ Proc = $p; Hwnd = [IntPtr]::Zero }
+}
+
+# Docks a started console into its pane once its window exists.
+function Dock-Console($pane) {
+    [ConsoleDock]::Embed($pane.Hwnd, $pane.View.Handle)
+    foreach ($c in @($pane.View.Controls)) { $c.Dispose() }   # the "Starting..." note
+    $pane.Fresh = $true   # conhost only paints after a later re-fit
+    Fit-Pane $pane
+    if ($pane.Tab -eq (Get-SelectedTab) -and (Get-ActivePane $pane.Tab) -eq $pane -and $form.ContainsFocus) { Focus-Pane $pane }
+}
+
+function Update-PendingConsoles {
+    $waiting = 0
+    foreach ($pane in (Get-AllPanes)) {
+        if ($pane.Hwnd -ne [IntPtr]::Zero -or $pane.Failed -or $pane.Closing) { continue }   # closed while starting: not a failure
+        $h = if ($pane.Proc.HasExited) { [IntPtr]::Zero } else { [ConsoleDock]::FindConsoleWindow($pane.Proc.Id) }
+        if ($h -ne [IntPtr]::Zero) { $pane.Hwnd = $h; Dock-Console $pane; continue }
+        if ($pane.Proc.HasExited -or ((Get-Date) - $pane.Started).TotalSeconds -gt $ConsoleTimeout) {
+            $pane.Failed = $true   # Update-Sessions removes it
+            if (-not $pane.Proc.HasExited) { & taskkill.exe /T /F /PID $pane.Proc.Id 2>&1 | Out-Null }
+            $script:FailedStarts += @($pane.Project.Name)
+            continue
+        }
+        $waiting++
+    }
+    if ($waiting -eq 0) { $dockTimer.Stop() }
 }
 
 # Pane cards have rounded corners: the card's window region (inset 1px) clips it and the console docked
@@ -1415,9 +1487,14 @@ function New-Pane($tab, $proj, $console) {
 
     $view = New-Object System.Windows.Forms.Panel
     $view.Dock = 'Fill'; $view.BackColor = [System.Drawing.Color]::Black
+    $starting = New-Object System.Windows.Forms.Label   # until the console window is docked
+    $starting.Dock = 'Fill'; $starting.TextAlign = 'MiddleCenter'
+    $starting.ForeColor = [Palette]::Muted; $starting.Text = "Starting$Ell"
+    $view.Controls.Add($starting)
 
     $pane = [pscustomobject]@{
         Proc = $console.Proc; Hwnd = $console.Hwnd; Project = $proj; Closing = $null; Fresh = $true
+        Started = (Get-Date); Failed = $false
         Tab = $tab; Frame = $frame; View = $view; Header = $header; NameLabel = $title
     }
 
@@ -1453,8 +1530,7 @@ function New-Pane($tab, $proj, $console) {
 }
 
 function Attach-Pane($pane) {
-    [ConsoleDock]::Embed($pane.Hwnd, $pane.View.Handle)
-    Fit-Pane $pane
+    if ($pane.Hwnd -ne [IntPtr]::Zero) { Dock-Console $pane }
     Set-ActivePane $pane $true
     Update-TabTitle $pane.Tab
 }
@@ -1798,6 +1874,10 @@ function Close-Pane($pane) {
     if (-not $pane -or $pane.Closing) { return }
     $pane.Closing = (Get-Date).AddSeconds(3)
     $pane.NameLabel.Text = "$($pane.Project.Name) (closing$Ell)"
+    if ($pane.Hwnd -eq [IntPtr]::Zero) {   # still starting: nothing to ask yet
+        if (-not $pane.Proc.HasExited) { & taskkill.exe /T /F /PID $pane.Proc.Id 2>&1 | Out-Null }
+        return
+    }
     [void][ConsoleDock]::PostMessage($pane.Hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)   # WM_CLOSE
 }
 
@@ -1818,7 +1898,8 @@ function Activate-PaneAt($hwnd) {
 function Update-Sessions {
     if ($script:Keys) { $script:Keys.PaneKeys = ((Get-SelectedTab).Panes.Count -gt 1) }
     foreach ($pane in (Get-AllPanes)) {
-        if ($pane.Proc.HasExited) {
+        $starting = ($pane.Hwnd -eq [IntPtr]::Zero) -and -not $pane.Failed -and -not $pane.Closing   # $dockTimer reports those
+        if ($pane.Proc.HasExited -and -not $starting) {
             Remove-Pane $pane
         } elseif ($pane.Fresh) {
             $pane.Fresh = $false   # first tick after docking: re-fit so conhost paints
@@ -1826,6 +1907,12 @@ function Update-Sessions {
         } elseif ($pane.Closing -and (Get-Date) -gt $pane.Closing) {
             & taskkill.exe /T /F /PID $pane.Proc.Id 2>&1 | Out-Null
         }
+    }
+    if ($script:SavePending) { $script:SavePending = $false; Save-Config }
+    if ($script:FailedStarts) {
+        $names = $script:FailedStarts -join ', '
+        $script:FailedStarts = @()   # cleared first: the timer keeps ticking behind the message box
+        [System.Windows.Forms.MessageBox]::Show("Could not start a console for $names.", 'Claude Launcher', 'OK', 'Error') | Out-Null
     }
 }
 
@@ -2428,6 +2515,9 @@ $sessionTimer = New-Object System.Windows.Forms.Timer
 $sessionTimer.Interval = 250
 $sessionTimer.Add_Tick({ Update-Sessions })
 $sessionTimer.Start()
+$dockTimer = New-Object System.Windows.Forms.Timer   # runs only while a console is starting
+$dockTimer.Interval = 50
+$dockTimer.Add_Tick({ Update-PendingConsoles })
 
 # events
 $btnOpen.Add_Click({ Open-Selected })
@@ -2480,6 +2570,7 @@ $form.Add_Shown({
         $lblStatus.Text = 'Windows Terminal (wt.exe) not found - projects will open in separate cmd windows.'
     }
     if ($script:ConfigWarning) { $lblStatus.Text = $script:ConfigWarning }
+    Start-TypeCacheWarmer
     # reopen last time's tabs once the window has painted
     $restoreTimer = New-Object System.Windows.Forms.Timer
     $restoreTimer.Interval = 150
