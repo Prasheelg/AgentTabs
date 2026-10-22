@@ -1,23 +1,23 @@
 #Requires -Version 5.1
 <#
-  Claude Launcher
+  Agent Tabs
   Lists your projects; click to open Claude Code in a tab inside the launcher
   (a conhost window docked into the tab), or optionally in an external Windows Terminal.
   Each tab can be split into side-by-side / stacked panes, one Claude session per pane.
-  Config is stored in %APPDATA%\ClaudeLauncher\config.json
+  Config is stored in %APPDATA%\AgentTabs\config.json
 #>
 
 # The launcher runs without a visible console, so a failure before the window appears would be silent:
 # log it and say so. (Errors inside UI event handlers don't reach this trap; WinForms reports those.)
 trap {
-    $log = Join-Path $env:LOCALAPPDATA 'ClaudeLauncher\error.log'
+    $log = Join-Path $env:LOCALAPPDATA 'AgentTabs\error.log'
     try {
         New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
         "[$(Get-Date -Format s)] $_`r`n$($_.ScriptStackTrace)`r`n" | Out-File -LiteralPath $log -Append -Encoding UTF8
     } catch { }
     Add-Type -AssemblyName System.Windows.Forms
-    [System.Windows.Forms.MessageBox]::Show("Claude Launcher could not start:`n`n$_`n`nDetails: $log",
-        'Claude Launcher', 'OK', 'Error') | Out-Null
+    [System.Windows.Forms.MessageBox]::Show("Agent Tabs could not start:`n`n$_`n`nDetails: $log",
+        'Agent Tabs', 'OK', 'Error') | Out-Null
     exit 1
 }
 
@@ -25,11 +25,11 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
-# Compiling the C# below takes ~0.45 s, so a compiled copy is cached in %LOCALAPPDATA%\ClaudeLauncher\types,
+# Compiling the C# below takes ~0.45 s, so a compiled copy is cached in %LOCALAPPDATA%\AgentTabs\types,
 # named after a hash of the source. Windows Defender scans a new DLL for several seconds the first time it's
 # loaded, so a missing copy is built and loaded once by a hidden background process (Start-TypeCacheWarmer)
 # and only used from the next start on, once it's marked .ready. Until then the source is compiled in memory.
-$TypeCache = Join-Path $env:LOCALAPPDATA 'ClaudeLauncher\types'
+$TypeCache = Join-Path $env:LOCALAPPDATA 'AgentTabs\types'
 $script:TypeFiles = @()
 function Import-Type($Name, $TypeDefinition) {
     $sha  = [System.Security.Cryptography.SHA256]::Create()
@@ -163,10 +163,10 @@ public static class ConsoleDock {
 '@
 
 # One launcher per user session: a second start just brings the running one to the front.
-$script:Instance = New-Object System.Threading.Mutex($false, 'Local\ClaudeLauncher')
+$script:Instance = New-Object System.Threading.Mutex($false, 'Local\AgentTabs')
 try { $first = $script:Instance.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $first = $true }   # previous one crashed
 if (-not $first) {
-    [void][ConsoleDock]::Activate('Claude Launcher')
+    [void][ConsoleDock]::Activate('Agent Tabs')
     exit 0
 }
 
@@ -986,8 +986,17 @@ public class DarkMenuColors : ProfessionalColorTable {
 }
 '@
 
-$AppDir     = Join-Path $env:APPDATA 'ClaudeLauncher'
+$AppDir     = Join-Path $env:APPDATA 'AgentTabs'
 $ConfigPath = Join-Path $AppDir 'config.json'
+
+# The app was called Claude Launcher before; carry its settings over on first run under the new name.
+$OldConfig = Join-Path $env:APPDATA 'ClaudeLauncher\config.json'
+if (-not (Test-Path -LiteralPath $ConfigPath) -and (Test-Path -LiteralPath $OldConfig)) {
+    try {
+        New-Item -ItemType Directory -Path $AppDir -Force | Out-Null
+        Copy-Item -LiteralPath $OldConfig -Destination $ConfigPath
+    } catch { }
+}
 $WindowName = 'ClaudeProjects'   # all tabs go into this named Windows Terminal window
 $MaxPanes   = 8                  # per tab
 
@@ -1341,7 +1350,7 @@ function Open-SideBySide {
     if ($projs.Count -eq 0) { return }
     if ($projs.Count -gt $MaxPanes) {
         [System.Windows.Forms.MessageBox]::Show("Only the first $MaxPanes projects will be opened side by side.",
-            'Claude Launcher', 'OK', 'Information') | Out-Null
+            'Agent Tabs', 'OK', 'Information') | Out-Null
         $projs = $projs[0..($MaxPanes - 1)]
     }
     if ($chkExternal.Checked) { Open-External $projs } else { Open-Grid $projs }
@@ -1363,7 +1372,7 @@ function Start-Console($proj) {
         $si.UseShellExecute = $true; $si.WindowStyle = 'Hidden'; $si.WorkingDirectory = $proj.Path
         $p = [System.Diagnostics.Process]::Start($si)
     } catch {
-        [System.Windows.Forms.MessageBox]::Show("Could not start a console for $($proj.Name).`n`n$_", 'Claude Launcher', 'OK', 'Error') | Out-Null
+        [System.Windows.Forms.MessageBox]::Show("Could not start a console for $($proj.Name).`n`n$_", 'Agent Tabs', 'OK', 'Error') | Out-Null
         return $null
     }
     Note-Recent $proj
@@ -1602,7 +1611,7 @@ function Split-Pane($pane, $orientation, $proj) {
 function Split-Interactive($pane, $orientation) {
     if (-not $pane) { return }
     if ($pane.Tab.Panes.Count -ge $MaxPanes) {
-        [System.Windows.Forms.MessageBox]::Show("A tab can hold up to $MaxPanes panes.", 'Claude Launcher', 'OK', 'Information') | Out-Null
+        [System.Windows.Forms.MessageBox]::Show("A tab can hold up to $MaxPanes panes.", 'Agent Tabs', 'OK', 'Information') | Out-Null
         return
     }
     $proj = Pick-Project $(if ($orientation -eq 'Vertical') { 'Split right' } else { 'Split down' }) $pane.Project
@@ -1715,7 +1724,7 @@ function Move-PaneInto($pane, $dst, $orientation, $target) {
     if (-not $target) { $target = Get-ActivePane $dst }
     if (-not $target -or $pane.Tab -eq $dst) { return }
     if ($dst.Panes.Count -ge $MaxPanes) {
-        [System.Windows.Forms.MessageBox]::Show("A tab can hold up to $MaxPanes panes.", 'Claude Launcher', 'OK', 'Information') | Out-Null
+        [System.Windows.Forms.MessageBox]::Show("A tab can hold up to $MaxPanes panes.", 'Agent Tabs', 'OK', 'Information') | Out-Null
         return
     }
     Detach-Pane $pane
@@ -1733,7 +1742,7 @@ function Move-PaneInto($pane, $dst, $orientation, $target) {
 # Moves every pane of tab $src into tab $dst, one after another along $orientation.
 function Merge-Tab($src, $dst, $orientation) {
     if ($src.Panes.Count + $dst.Panes.Count -gt $MaxPanes) {
-        [System.Windows.Forms.MessageBox]::Show("A tab can hold up to $MaxPanes panes.", 'Claude Launcher', 'OK', 'Information') | Out-Null
+        [System.Windows.Forms.MessageBox]::Show("A tab can hold up to $MaxPanes panes.", 'Agent Tabs', 'OK', 'Information') | Out-Null
         return
     }
     $target = Get-ActivePane $dst
@@ -1912,7 +1921,7 @@ function Update-Sessions {
     if ($script:FailedStarts) {
         $names = $script:FailedStarts -join ', '
         $script:FailedStarts = @()   # cleared first: the timer keeps ticking behind the message box
-        [System.Windows.Forms.MessageBox]::Show("Could not start a console for $names.", 'Claude Launcher', 'OK', 'Error') | Out-Null
+        [System.Windows.Forms.MessageBox]::Show("Could not start a console for $names.", 'Agent Tabs', 'OK', 'Error') | Out-Null
     }
 }
 
@@ -2208,7 +2217,7 @@ function Show-RootsDialog {
 
 # ---------------------------------------------------------------- UI
 $form = New-Object System.Windows.Forms.Form
-$form.Text = 'Claude Launcher'
+$form.Text = 'Agent Tabs'
 $form.Size = New-Object System.Drawing.Size(1280, 800)
 $form.MinimumSize = New-Object System.Drawing.Size(720, 440)
 $form.StartPosition = 'CenterScreen'
@@ -2588,7 +2597,7 @@ $form.Add_FormClosing({
     if ($open.Count -gt 0) {
         $msg = "Close $($open.Count) open Claude session(s)?"
         if ($chkReopen.Checked) { $msg += "`n`nYour tabs will reopen the next time you start the launcher." }
-        $ans = [System.Windows.Forms.MessageBox]::Show($msg, 'Claude Launcher', 'YesNo', 'Question')
+        $ans = [System.Windows.Forms.MessageBox]::Show($msg, 'Agent Tabs', 'YesNo', 'Question')
         if ($ans -ne 'Yes') { $e.Cancel = $true; return }
     }
     Save-Session

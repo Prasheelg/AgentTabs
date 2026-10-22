@@ -1,4 +1,4 @@
-# Claude Launcher
+# Agent Tabs
 
 A small Windows app for opening [Claude Code](https://claude.com/claude-code) in your projects.
 It lists your project folders; open one and Claude Code runs in a tab inside the launcher.
@@ -20,16 +20,16 @@ From the project folder, run:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-This creates `dist\ClaudeLauncher.exe`. The build uses the C# compiler that ships with Windows, so it needs no Visual Studio or SDK.
+This creates `dist\AgentTabs.exe`. The build uses the C# compiler that ships with Windows, so it needs no Visual Studio or SDK.
 
 The exe is a single self-contained file with the launcher script embedded. When it runs, it copies the script to
-`%LOCALAPPDATA%\ClaudeLauncher` and starts it without a console window.
+`%LOCALAPPDATA%\AgentTabs` and starts it without a console window.
 
-Rebuild after changing `ClaudeLauncher.ps1`. The exe carries its own copy of the script, so it won't see your changes until it's rebuilt.
+Rebuild after changing `AgentTabs.ps1`. The exe carries its own copy of the script, so it won't see your changes until it's rebuilt.
 
 ## Install on another machine
 
-1. Copy `dist\ClaudeLauncher.exe` anywhere, for example `C:\Tools`.
+1. Copy `dist\AgentTabs.exe` anywhere, for example `C:\Tools`.
 2. Double-click it. To pin it, right-click it and choose **Pin to Start** or **Pin to taskbar**.
 
 The exe isn't code-signed, so the first time it runs Windows SmartScreen may say "Windows protected your PC".
@@ -37,8 +37,8 @@ Choose **More info**, then **Run anyway**.
 
 ## Run from source (without building)
 
-Double-click `ClaudeLauncher.vbs`. It starts the launcher with no console window flashing up.
-`ClaudeLauncher.bat` does the same, but briefly shows a console window. Keep it as a fallback, since Microsoft is
+Double-click `AgentTabs.vbs`. It starts the launcher with no console window flashing up.
+`AgentTabs.bat` does the same, but briefly shows a console window. Keep it as a fallback, since Microsoft is
 phasing out VBScript.
 
 ## Using it
@@ -77,10 +77,10 @@ These work even while you're typing in a session:
 
 | Path | Contents |
 |---|---|
-| `%APPDATA%\ClaudeLauncher\config.json` | Settings: root folders, pinned and hidden projects, options, window position, open tabs |
-| `%LOCALAPPDATA%\ClaudeLauncher\error.log` | Details of any error that stopped the launcher from starting |
-| `%LOCALAPPDATA%\ClaudeLauncher\types\` | Cached compiled helpers, so the launcher starts faster (safe to delete) |
-| `%LOCALAPPDATA%\ClaudeLauncher\ClaudeLauncher.ps1` | The script copied out of the exe |
+| `%APPDATA%\AgentTabs\config.json` | Settings: root folders, pinned and hidden projects, options, window position, open tabs |
+| `%LOCALAPPDATA%\AgentTabs\error.log` | Details of any error that stopped the launcher from starting |
+| `%LOCALAPPDATA%\AgentTabs\types\` | Cached compiled helpers, so the launcher starts faster (safe to delete) |
+| `%LOCALAPPDATA%\AgentTabs\AgentTabs.ps1` | The script copied out of the exe |
 
 If `config.json` can't be read, the launcher renames it to `config.json.bad-<date>` and starts with default settings.
 
@@ -88,6 +88,6 @@ If `config.json` can't be read, the launcher renames it to `config.json.bad-<dat
 
 | File | Purpose |
 |---|---|
-| `ClaudeLauncher.ps1` | The launcher (Windows PowerShell + WinForms) |
-| `build.ps1` | Builds `dist\ClaudeLauncher.exe` |
-| `ClaudeLauncher.vbs` / `ClaudeLauncher.bat` | Run the script directly, without building |
+| `AgentTabs.ps1` | The launcher (Windows PowerShell + WinForms) |
+| `build.ps1` | Builds `dist\AgentTabs.exe` |
+| `AgentTabs.vbs` / `AgentTabs.bat` | Run the script directly, without building |
