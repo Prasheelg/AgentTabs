@@ -56,7 +56,7 @@ using System.Windows.Forms;
 
 static class Program {
     [STAThread]
-    static int Main() {
+    static int Main(string[] args) {
         try {
             byte[] data;
             using (var s = Assembly.GetExecutingAssembly().GetManifestResourceStream("AgentTabs.ps1"))
@@ -67,9 +67,11 @@ static class Program {
             string script = Path.Combine(dir, "AgentTabs.ps1");
             if (!File.Exists(script) || !File.ReadAllBytes(script).SequenceEqual(data)) File.WriteAllBytes(script, data);
 
-            // conhost --headless gives PowerShell a console without ever creating a window (and keeps Windows Terminal out of it).
             string sys = Environment.SystemDirectory;
             string ps = Path.Combine(sys, @"WindowsPowerShell\v1.0\powershell.exe");
+            if (args.Length > 0) return RunCommand(ps, script, args);
+
+            // conhost --headless gives PowerShell a console without ever creating a window (and keeps Windows Terminal out of it).
             var psi = new ProcessStartInfo(Path.Combine(sys, "conhost.exe"),
                 "--headless \"" + ps + "\" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -STA -File \"" + script + "\"");
             psi.UseShellExecute = false;
@@ -77,9 +79,41 @@ static class Program {
             Process.Start(psi);
             return 0;
         } catch (Exception ex) {
+            if (args.Length > 0) { Console.Error.WriteLine("Agent Tabs: " + ex.Message); return 1; }
             MessageBox.Show("Could not start Agent Tabs:\n\n" + ex.Message, "Agent Tabs", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 1;
         }
+    }
+
+    // A command such as "open <folder>": run the script with it, wait, and pass its output and exit code on.
+    static int RunCommand(string ps, string script, string[] args) {
+        var psi = new ProcessStartInfo(ps, "-NoProfile -ExecutionPolicy Bypass -File " + Quote(script) + " " +
+                                           string.Join(" ", args.Select(Quote)));
+        psi.UseShellExecute = false;
+        psi.CreateNoWindow = true;
+        psi.RedirectStandardOutput = true;
+        psi.RedirectStandardError = true;
+        using (var p = Process.Start(psi)) {
+            var err = p.StandardError.ReadToEndAsync();
+            Console.Out.Write(p.StandardOutput.ReadToEnd());
+            Console.Error.Write(err.Result);
+            p.WaitForExit();
+            return p.ExitCode;
+        }
+    }
+
+    // Quotes one argument the way CommandLineToArgvW reads it back.
+    static string Quote(string s) {
+        var sb = new System.Text.StringBuilder("\"");
+        int slashes = 0;
+        foreach (char c in s) {
+            if (c == '\\') { slashes++; continue; }
+            sb.Append('\\', c == '"' ? slashes * 2 + 1 : slashes);
+            slashes = 0;
+            sb.Append(c);
+        }
+        sb.Append('\\', slashes * 2);
+        return sb.Append('"').ToString();
     }
 }
 '@

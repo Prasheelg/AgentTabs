@@ -61,6 +61,27 @@ Options at the bottom of the window:
 | External terminal | Opens projects in Windows Terminal instead of inside the launcher |
 | Glass window | Makes the window slightly see-through |
 
+### Open a project from the command line
+
+With the launcher running, this opens a folder in a new tab, using the options that are switched on
+(so with Remote Control on, the new session shows up in the Claude app):
+
+```
+AgentTabs.exe open <folder>
+```
+
+It prints the result and exits with 0 on success or 1 on an error, such as a missing folder or the launcher not running.
+A relative folder is resolved against the current directory. Running from source, use
+`powershell -File AgentTabs.ps1 open <folder>`.
+
+This lets you start a new project while you're away from the desk: ask a Claude session you're driving with
+Remote Control to create the folder and run the command. PowerShell doesn't wait for a windowed program like
+`AgentTabs.exe`, so from PowerShell run it as `cmd /c AgentTabs.exe open <folder>`. From bash or cmd it works as is.
+
+Claude Code asks whether you trust a folder the first time it opens there, and nobody is at the desk to answer.
+A folder inside one you already trust doesn't ask, so trust your root folder once: run `claude` in it and choose
+**Yes, I trust this folder**. New projects created under it then open without the prompt.
+
 ### Keyboard shortcuts
 
 These work even while you're typing in a session:

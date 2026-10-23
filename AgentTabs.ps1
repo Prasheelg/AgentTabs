@@ -5,7 +5,19 @@
   (a conhost window docked into the tab), or optionally in an external Windows Terminal.
   Each tab can be split into side-by-side / stacked panes, one Claude session per pane.
   Config is stored in %APPDATA%\AgentTabs\config.json
+
+  "AgentTabs.ps1 open <folder>" (or "AgentTabs.exe open <folder>") opens the folder in a new tab of the
+  running launcher and prints the result, e.g. from a Claude session you're driving with Remote Control.
 #>
+
+# "open <folder>": resolved now, against the caller's current directory
+$script:OpenRequest = $null
+if ($args.Count -gt 0) {
+    if ($args[0] -ne 'open' -or $args.Count -ne 2) { [Console]::Error.WriteLine('Usage: AgentTabs open <folder>'); exit 2 }
+    $path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($args[1]).TrimEnd('\')
+    if ($path -match ':$') { $path += '\' }   # keep a drive root as "C:\", not "C:" (the current folder on C:)
+    $script:OpenRequest = $path
+}
 
 # The launcher runs without a visible console, so a failure before the window appears would be silent:
 # log it and say so. (Errors inside UI event handlers don't reach this trap; WinForms reports those.)
@@ -15,6 +27,7 @@ trap {
         New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
         "[$(Get-Date -Format s)] $_`r`n$($_.ScriptStackTrace)`r`n" | Out-File -LiteralPath $log -Append -Encoding UTF8
     } catch { }
+    if ($script:OpenRequest) { [Console]::Error.WriteLine("Agent Tabs: $_"); exit 1 }   # a command line call: no dialog to wait on
     Add-Type -AssemblyName System.Windows.Forms
     [System.Windows.Forms.MessageBox]::Show("Agent Tabs could not start:`n`n$_`n`nDetails: $log",
         'Agent Tabs', 'OK', 'Error') | Out-Null
@@ -98,6 +111,10 @@ public static class ConsoleDock {
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindow(string cls, string title);
     [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hwnd);
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern bool RedrawWindow(IntPtr hwnd, IntPtr rect, IntPtr rgn, uint flags);
+
+    // Marks the whole window for repainting and returns at once (no RDW_UPDATENOW: a busy console can't stall us).
+    public static void Invalidate(IntPtr hwnd) { RedrawWindow(hwnd, IntPtr.Zero, IntPtr.Zero, 0x0001 | 0x0080); }   // RDW_INVALIDATE | RDW_ALLCHILDREN
 
     // Brings a top-level window with this exact title to the front (restoring it if minimised).
     public static bool Activate(string title) {
@@ -162,9 +179,72 @@ public static class ConsoleDock {
 }
 '@
 
+# Carries "open <folder>" from a second launch to the running launcher: one line in, one line back
+# ("ok <message>" or "error <message>"). Only this user can connect.
+Import-Type 'ipc' -TypeDefinition @'
+using System;
+using System.IO;
+using System.IO.Pipes;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using System.Text;
+using System.Threading;
+using System.Windows.Forms;
+
+public static class OpenPipe {
+    static readonly string Name = "AgentTabs-" + Environment.UserName + "-" + System.Diagnostics.Process.GetCurrentProcess().SessionId;
+
+    // Returns the launcher's reply, or null if none answered within timeoutMs.
+    public static string Send(string request, int timeoutMs) {
+        try {
+            using (var pipe = new NamedPipeClientStream(".", Name, PipeDirection.InOut)) {
+                pipe.Connect(timeoutMs);
+                var w = new StreamWriter(pipe, new UTF8Encoding(false));
+                w.WriteLine(request);
+                w.Flush();
+                return new StreamReader(pipe, Encoding.UTF8).ReadLine();
+            }
+        } catch (TimeoutException) { return null; }
+        catch (IOException) { return null; }
+    }
+
+    // Answers requests on a background thread; handler runs on owner's UI thread and returns the reply.
+    public static void Serve(Control owner, Func<string, string> handler) {
+        var t = new Thread(() => {
+            var security = new PipeSecurity();
+            security.AddAccessRule(new PipeAccessRule(WindowsIdentity.GetCurrent().User, PipeAccessRights.FullControl, AccessControlType.Allow));
+            while (true) {
+                try {
+                    using (var pipe = new NamedPipeServerStream(Name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.None, 0, 0, security)) {
+                        pipe.WaitForConnection();
+                        string request = new StreamReader(pipe, Encoding.UTF8).ReadLine();
+                        string reply;
+                        try { reply = (string)owner.Invoke(handler, request); }
+                        catch (Exception ex) { reply = "error " + ex.Message; }
+                        var w = new StreamWriter(pipe, new UTF8Encoding(false));
+                        w.WriteLine(reply);
+                        w.Flush();
+                        pipe.WaitForPipeDrain();
+                    }
+                } catch (Exception) { Thread.Sleep(500); }   // e.g. the caller hung up early; listen again
+            }
+        });
+        t.IsBackground = true;
+        t.Start();
+    }
+}
+'@
+
 # One launcher per user session: a second start just brings the running one to the front.
 $script:Instance = New-Object System.Threading.Mutex($false, 'Local\AgentTabs')
 try { $first = $script:Instance.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $first = $true }   # previous one crashed
+if ($script:OpenRequest) {
+    if ($first) { [Console]::Error.WriteLine('Agent Tabs is not running. Start it first.'); exit 1 }
+    $reply = [OpenPipe]::Send("open $script:OpenRequest", 10000)
+    if ($null -eq $reply) { [Console]::Error.WriteLine('Agent Tabs is running but did not answer.'); exit 1 }
+    if ($reply.StartsWith('ok ')) { $reply.Substring(3); exit 0 }
+    [Console]::Error.WriteLine($reply -replace '^error ', ''); exit 1
+}
 if (-not $first) {
     [void][ConsoleDock]::Activate('Agent Tabs')
     exit 0
@@ -1915,6 +1995,10 @@ function Update-Sessions {
             Fit-Pane $pane
         } elseif ($pane.Closing -and (Get-Date) -gt $pane.Closing) {
             & taskkill.exe /T /F /PID $pane.Proc.Id 2>&1 | Out-Null
+        } elseif ($pane.Hwnd -ne [IntPtr]::Zero -and $pane.Tab -eq (Get-SelectedTab) -and $form.WindowState -ne 'Minimized') {
+            # a docked conhost sometimes leaves in-place updates unpainted (e.g. Claude's input box and
+            # status line) until something like a selection repaints it, so keep the visible ones fresh
+            [ConsoleDock]::Invalidate($pane.Hwnd)
         }
     }
     if ($script:SavePending) { $script:SavePending = $false; Save-Config }
@@ -2019,6 +2103,20 @@ function Restore-Session {
     $i = [int]$s.selected
     Select-Tab $(if ($i -gt 0 -and $i -lt $strip.Tabs.Count) { $strip.Tabs[$i].Tag } else { $homeTab })
     Refresh-List   # puts the usual status line back
+}
+
+# Handles "open <folder>" from a second launch (see OpenPipe); returns the reply line.
+function Invoke-OpenRequest($request) {
+    if ($request -notmatch '^open (.+)$') { return "error Unknown request: $request" }
+    $path = $Matches[1]
+    if (-not (Test-Path -LiteralPath $path -PathType Container)) { return "error Folder not found: $path" }
+    Reload-Projects   # so a folder just created under a root folder is listed too
+    $proj = Get-ProjectAt $path
+    if ($chkExternal.Checked) { Open-External @($proj) -Tabs }
+    elseif (-not (Open-InNewTab $proj)) { return "error Could not start a session for $($proj.Name)" }
+    Update-RecentOrder
+    $how = if ($chkRemote.Checked) { ' with Remote Control' } else { '' }
+    return "ok Opened $($proj.Name)$how"
 }
 
 # ---------------------------------------------------------------- window placement
@@ -2572,6 +2670,8 @@ $form.Add_Shown({
     $script:Clicks.add_Clicked({ param($s, $e) Activate-PaneAt $e.Hwnd })
     $script:Keys = New-Object KeyWatcher($form)
     $script:Keys.add_Command({ param($s, $e) Invoke-TabCommand $e.Name })
+    # last output line is the reply, in case a helper along the way writes to the pipeline
+    [OpenPipe]::Serve($form, [Func[string, string]]{ param($req) [string](@(Invoke-OpenRequest $req)[-1]) })
     Reload-Projects
     Fit-Columns
     Select-Tab $homeTab
