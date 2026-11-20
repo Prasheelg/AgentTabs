@@ -12,6 +12,7 @@
 
 # "open <folder>": resolved now, against the caller's current directory
 $script:OpenRequest = $null
+$script:ScriptPath  = $PSCommandPath
 if ($args.Count -gt 0) {
     if ($args[0] -ne 'open' -or $args.Count -ne 2) { [Console]::Error.WriteLine('Usage: AgentTabs open <folder>'); exit 2 }
     $path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($args[1]).TrimEnd('\')
@@ -1082,7 +1083,7 @@ $MaxPanes   = 8                  # per tab
 
 # ---------------------------------------------------------------- config
 function Load-Config {
-    $cfg = @{ roots = @(); projects = @(); hidden = @(); recent = @(); continue = $false; external = $false; remote = $false; glass = $false
+    $cfg = @{ roots = @(); projects = @(); hidden = @(); recent = @(); continue = $false; external = $false; remote = $false; glass = $false; autorun = $false
               reopen = $true; window = $null; session = $null }
     if (Test-Path -LiteralPath $ConfigPath) {
         try {
@@ -1095,6 +1096,7 @@ function Load-Config {
             if ($j.external) { $cfg.external = [bool]$j.external }
             if ($j.remote)   { $cfg.remote   = [bool]$j.remote }
             if ($j.glass)    { $cfg.glass    = [bool]$j.glass }
+            if ($j.autorun)  { $cfg.autorun  = [bool]$j.autorun }
             if ($null -ne $j.reopen) { $cfg.reopen = [bool]$j.reopen }   # on unless turned off
             if ($j.window)   { $cfg.window   = $j.window }
             if ($j.session)  { $cfg.session  = $j.session }
@@ -1114,6 +1116,7 @@ function Save-Config {
     $script:Config.external = $chkExternal.Checked
     $script:Config.remote   = $chkRemote.Checked
     $script:Config.glass    = $chkGlass.Checked
+    $script:Config.autorun  = $chkRun.Checked
     $script:Config.reopen   = $chkReopen.Checked
     [pscustomobject]@{
         roots    = @($script:Config.roots)
@@ -1124,6 +1127,7 @@ function Save-Config {
         external = [bool]$script:Config.external
         remote   = [bool]$script:Config.remote
         glass    = [bool]$script:Config.glass
+        autorun  = [bool]$script:Config.autorun
         reopen   = [bool]$script:Config.reopen
         window   = $script:Config.window
         session  = $script:Config.session
@@ -1131,6 +1135,30 @@ function Save-Config {
     # swap the finished file in, so a crash mid-write can't leave a truncated config
     if (Test-Path -LiteralPath $ConfigPath) { [System.IO.File]::Replace("$ConfigPath.tmp", $ConfigPath, [NullString]::Value) }   # no backup copy
     else { Move-Item -LiteralPath "$ConfigPath.tmp" -Destination $ConfigPath }
+}
+
+# ---------------------------------------------------------------- start with Windows
+# Kept in the per-user Run key (not in config.json), so the switch always shows what Windows will really do.
+$RunKey  = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$RunName = 'Agent Tabs'
+
+# The exe passes its own path in AGENTTABS_EXE; run from source, start the script the way AgentTabs.vbs does.
+function Get-StartupCommand {
+    if ($env:AGENTTABS_EXE -and (Test-Path -LiteralPath $env:AGENTTABS_EXE)) { return "`"$env:AGENTTABS_EXE`"" }
+    $sys = [Environment]::SystemDirectory
+    return "`"$sys\conhost.exe`" --headless `"$sys\WindowsPowerShell\v1.0\powershell.exe`" -NoProfile " +
+           "-ExecutionPolicy Bypass -WindowStyle Hidden -STA -File `"$($script:ScriptPath)`""
+}
+
+function Get-StartWithWindows {
+    $v = Get-ItemProperty -LiteralPath $RunKey -Name $RunName -ErrorAction SilentlyContinue
+    if ($v) { return [string]$v.$RunName }
+    return $null
+}
+
+function Set-StartWithWindows([bool]$on) {
+    if ($on) { New-ItemProperty -LiteralPath $RunKey -Name $RunName -Value (Get-StartupCommand) -PropertyType String -Force | Out-Null }
+    else     { Remove-ItemProperty -LiteralPath $RunKey -Name $RunName -ErrorAction SilentlyContinue }
 }
 
 $script:Config = Load-Config
@@ -1377,6 +1405,7 @@ function Get-ClaudeCmd($proj) {
         $name = ($proj.Name -replace '[^A-Za-z0-9._-]+', '-').Trim('-')
         $cmd += " --remote-control $name"
     }
+    if ($chkRun.Checked) { $cmd += ' /run' }   # first prompt: Claude's /run skill starts the project's app
     return $cmd
 }
 
@@ -2476,7 +2505,12 @@ $script:Tip.SetToolTip($chkExternal, 'Open projects in Windows Terminal instead 
 $chkGlass    = New-Check 'Glass window' ([bool]$script:Config.glass)
 $script:Tip.SetToolTip($chkGlass, 'Make the whole window slightly see-through (consoles included)')
 $script:Tip.SetToolTip($chkRemote, 'Start every session with Remote Control on (claude --remote-control <project>)')
-$opts.Controls.AddRange(@($chkReopen, $chkContinue, $chkRemote, $chkExternal, $chkGlass))
+$script:StartupCmd = Get-StartWithWindows
+$chkStartup  = New-Check 'Start with Windows' ([bool]$script:StartupCmd)
+$script:Tip.SetToolTip($chkStartup, 'Open Agent Tabs when you sign in to Windows. With Reopen tabs and Remote Control on, your sessions come back and show up in the Claude app.')
+$chkRun      = New-Check 'Run on open' ([bool]$script:Config.autorun)
+$script:Tip.SetToolTip($chkRun, "Start each session with /run, so Claude launches the project's app as it opens")
+$opts.Controls.AddRange(@($chkStartup, $chkReopen, $chkContinue, $chkRemote, $chkRun, $chkExternal, $chkGlass))
 
 $footer.Controls.Add($lblStatus)
 $footer.Controls.Add($opts)
@@ -2636,6 +2670,13 @@ $btnRefresh.Add_Click({ Reload-Projects })
 $chkReopen.Add_CheckedChanged({ Save-Config })
 $chkContinue.Add_CheckedChanged({ Save-Config })
 $chkRemote.Add_CheckedChanged({ Save-Config })
+$chkRun.Add_CheckedChanged({ Save-Config })
+$chkStartup.Add_CheckedChanged({
+    try { Set-StartWithWindows $chkStartup.Checked }
+    catch { $lblStatus.Text = "Couldn't change Start with Windows: $_" }
+})
+# keep the entry pointing at this copy, in case the exe was moved since it was switched on
+if ($script:StartupCmd -and $script:StartupCmd -ne (Get-StartupCommand)) { try { Set-StartWithWindows $true } catch { } }
 $chkExternal.Add_CheckedChanged({ Save-Config })
 $GlassOpacity = 0.94   # lower = more see-through (consoles too)
 function Set-GlassWindow { $form.Opacity = if ($chkGlass.Checked) { $GlassOpacity } else { 1.0 } }

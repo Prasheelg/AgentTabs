@@ -76,6 +76,7 @@ static class Program {
                 "--headless \"" + ps + "\" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -STA -File \"" + script + "\"");
             psi.UseShellExecute = false;
             psi.CreateNoWindow = true;
+            psi.EnvironmentVariables["AGENTTABS_EXE"] = Application.ExecutablePath;   // for "Start with Windows"
             Process.Start(psi);
             return 0;
         } catch (Exception ex) {

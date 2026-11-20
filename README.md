@@ -55,9 +55,11 @@ Options at the bottom of the window:
 
 | Option | What it does |
 |---|---|
+| Start with Windows | Opens the launcher when you sign in to Windows (a per-user entry under `HKCU\...\CurrentVersion\Run`). With Reopen tabs and Remote Control also on, your last tabs come back as Remote Control sessions you can reach from the Claude app |
 | Reopen tabs | Restores the tabs and split layout you had open when you last closed the launcher |
 | Resume last chat | Starts each session with `claude --continue` |
 | Remote Control | Starts each session with `claude --remote-control <project>` |
+| Run on open | Sends `/run` as each session's first prompt, so Claude starts the project's app when it opens (also applies to tabs reopened at startup) |
 | External terminal | Opens projects in Windows Terminal instead of inside the launcher |
 | Glass window | Makes the window slightly see-through |
 
